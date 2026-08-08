@@ -40,10 +40,16 @@ comparatively underexplored reasoning/long-CoT regime instead.
 
 ## Status
 
-Early-stage / scaffolding. No experiments run yet.
+Stage 0 harness (`cascade.py`) is implemented and unit-tested against synthetic data. Real-model
+wiring now exists too: `hf_runner.py` loads Qwen3-4B-Thinking-2507 in BF16/NF4 and produces the
+`StepDistribution`s `cascade.py` needs, and `notebooks/stage0_colab.ipynb` runs the full Stage 0
+loop against a MATH-500 subset. That notebook hasn't actually been executed yet (needs a Colab GPU
+runtime) — pending an actual run.
 
 ## Layout
 
 ```
-src/quant_research/   # library code
+src/quant_research/     # library code (cascade.py is pure/model-agnostic; hf_runner.py is the only
+                         # module that depends on torch/transformers/bitsandbytes, see `hf` extras)
+notebooks/               # Colab notebooks for real-model runs
 ```

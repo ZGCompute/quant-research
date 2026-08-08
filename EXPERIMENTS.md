@@ -26,6 +26,12 @@ reasoning trace goes wrong, not just whether the final answer is wrong.
 enough to iterate on. **Benchmarks:** AIME 2025/2026, MATH-500,
 GPQA-Diamond, LiveCodeBench. **Compute:** inference-only, single node.
 
+**Status (2026-08-08):** real-model wiring shipped — `src/quant_research/hf_runner.py` +
+`notebooks/stage0_colab.ipynb` run this stage against Qwen3-4B-Thinking-2507 (BF16 reference vs.
+bitsandbytes NF4 candidate) on a small MATH-500 subset. Not yet executed (needs a Colab GPU runtime).
+Note NF4 is a stand-in for MR-GPTQ/NVFP4 here — Colab hardware has no native FP4 tensor cores, so
+this is a harness smoke test, not yet a result usable for Stage 1's attribution claim.
+
 ## Stage 1 — Error attribution (weight vs. KV-cache vs. activation)
 
 **Hypothesis:** cascading failure is not uniform across quantization axes —

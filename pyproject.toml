@@ -8,6 +8,13 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["ruff", "pytest"]
+hf = [
+    "torch",
+    "transformers>=4.51",
+    "accelerate",
+    "bitsandbytes",
+    "datasets",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
