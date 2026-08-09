@@ -42,11 +42,26 @@ class LoadedModel:
     quant_mode: QuantMode
 
 
-def load_model(model_id: str, quant_mode: QuantMode = "bf16") -> LoadedModel:
+def load_model(
+    model_id: str, quant_mode: QuantMode = "bf16", attn_implementation: str = "eager"
+) -> LoadedModel:
     """Load model_id under the given quantization mode. Requires the `hf`
     extras. nf4/int8 use bitsandbytes — a calibration-free PTQ stand-in for
     the eventual MR-GPTQ/NVFP4 conditions, good enough for Stage 0's harness
-    smoke test on Ampere-class Colab GPUs which lack native FP4 tensor cores."""
+    smoke test on Ampere-class Colab GPUs which lack native FP4 tensor cores.
+
+    attn_implementation defaults to "eager" rather than the transformers
+    default (sdpa or flash-attention, whichever is available). generate()'s
+    incremental KV-cached decoding and teacher_forced_step_distributions'
+    single-shot bulk forward pass dispatch to different fused-attention code
+    paths under sdpa/flash, which can diverge slightly in bf16 and flip an
+    argmax at a close call — this showed up empirically as the reference
+    model failing its own self-check (teacher-forced-on-its-own-trace)
+    ~100% of the time on Stage 0's first real run. Eager attention is plain
+    matmuls with no cache-shape-dependent fused kernel, so the two code
+    paths compute the same thing whether or not a KV cache is present; it's
+    slower per token than sdpa/flash, which is an acceptable tradeoff here
+    since correctness of the self-check matters more than throughput."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -54,7 +69,10 @@ def load_model(model_id: str, quant_mode: QuantMode = "bf16") -> LoadedModel:
 
     if quant_mode == "bf16":
         model = AutoModelForCausalLM.from_pretrained(
-            model_id, dtype=torch.bfloat16, device_map="auto"
+            model_id,
+            dtype=torch.bfloat16,
+            device_map="auto",
+            attn_implementation=attn_implementation,
         )
     else:
         from transformers import BitsAndBytesConfig
@@ -69,18 +87,39 @@ def load_model(model_id: str, quant_mode: QuantMode = "bf16") -> LoadedModel:
             else BitsAndBytesConfig(load_in_8bit=True)
         )
         model = AutoModelForCausalLM.from_pretrained(
-            model_id, quantization_config=bnb_config, device_map="auto"
+            model_id,
+            quantization_config=bnb_config,
+            device_map="auto",
+            attn_implementation=attn_implementation,
         )
 
     model.eval()
     return LoadedModel(model=model, tokenizer=tokenizer, quant_mode=quant_mode)
 
 
+def _eos_token_ids(loaded: LoadedModel) -> set[int]:
+    """Collect every id that counts as "generation ended here" — models with
+    chat-turn tokens (e.g. Qwen's <|im_end|>) often list more than one in
+    generation_config.eos_token_id, beyond tokenizer.eos_token_id alone."""
+    ids: set[int] = set()
+    gen_eos = getattr(loaded.model.generation_config, "eos_token_id", None)
+    if isinstance(gen_eos, int):
+        ids.add(gen_eos)
+    elif gen_eos:
+        ids.update(gen_eos)
+    if loaded.tokenizer.eos_token_id is not None:
+        ids.add(loaded.tokenizer.eos_token_id)
+    return ids
+
+
 def generate_reference(
     loaded: LoadedModel, prompt: str, max_new_tokens: int = 1024
-) -> tuple[list[int], str]:
+) -> tuple[list[int], str, bool]:
     """Free-running greedy generation from the reference model. Returns the
-    generated response token ids (prompt stripped) and decoded text."""
+    generated response token ids (prompt stripped), decoded text, and
+    whether generation was truncated by max_new_tokens rather than reaching
+    an EOS token naturally (a truncated trace's extracted answer is not
+    trustworthy — the model never got to state one)."""
     import torch
 
     inputs = loaded.tokenizer(prompt, return_tensors="pt").to(loaded.model.device)
@@ -88,7 +127,10 @@ def generate_reference(
         out = loaded.model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
     response_ids = out[0][inputs["input_ids"].shape[1] :].tolist()
     text = loaded.tokenizer.decode(response_ids, skip_special_tokens=True)
-    return response_ids, text
+    truncated = len(response_ids) >= max_new_tokens and (
+        not response_ids or response_ids[-1] not in _eos_token_ids(loaded)
+    )
+    return response_ids, text, truncated
 
 
 def logits_to_step_distribution(step_logits: torch.Tensor, topk: int = 5) -> StepDistribution:

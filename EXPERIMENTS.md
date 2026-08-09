@@ -28,9 +28,17 @@ GPQA-Diamond, LiveCodeBench. **Compute:** inference-only, single node.
 
 **Status (2026-08-08):** real-model wiring shipped — `src/quant_research/hf_runner.py` +
 `notebooks/stage0_colab.ipynb` run this stage against Qwen3-4B-Thinking-2507 (BF16 reference vs.
-bitsandbytes NF4 candidate) on a small MATH-500 subset. Not yet executed (needs a Colab GPU runtime).
-Note NF4 is a stand-in for MR-GPTQ/NVFP4 here — Colab hardware has no native FP4 tensor cores, so
-this is a harness smoke test, not yet a result usable for Stage 1's attribution claim.
+bitsandbytes NF4 candidate) on a small MATH-500 subset. Note NF4 is a stand-in for MR-GPTQ/NVFP4
+here — Colab hardware has no native FP4 tensor cores, so this is a harness correctness check, not
+yet a result usable for Stage 1's attribution claim.
+
+First real execution (same day) surfaced two harness bugs rather than a usable result: the
+self-check (BF16 teacher-forced on its own trace) diverged on 8/8 problems, and every trace hit the
+1024-token cap before finishing. Fixed: `load_model` now defaults to `attn_implementation="eager"`
+(the likely cause was `generate()`'s cached decoding and the harness's bulk forward pass hitting
+different fused-attention kernels under sdpa/flash, diverging slightly in bf16); `MAX_NEW_TOKENS`
+raised to 4096 with truncation now tracked and reported per-trace and in aggregate. Re-run pending
+(needs a Colab GPU runtime).
 
 ## Stage 1 — Error attribution (weight vs. KV-cache vs. activation)
 
