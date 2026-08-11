@@ -97,6 +97,27 @@ def load_model(
     return LoadedModel(model=model, tokenizer=tokenizer, quant_mode=quant_mode)
 
 
+def unload_model(loaded: LoadedModel) -> None:
+    """Drop a LoadedModel's GPU memory. Keeping both the BF16 reference and
+    the NF4 candidate resident at once (as Stage 0 originally did, to score
+    both against the same trace without reloading) leaves too little
+    headroom on a single mid-range Colab GPU for eager attention's O(n^2)
+    activation memory on a several-hundred-token teacher-forced pass — this
+    showed up as a CUDA OOM on Stage 0's second real run. Calling this
+    between phases (finish everything that needs `reference`, unload it,
+    *then* load `candidate`) keeps only one 4B-class model resident at a
+    time. `del` alone does not free CUDA memory promptly enough here since
+    the caching allocator holds blocks until an explicit empty_cache."""
+    import gc
+
+    import torch
+
+    del loaded.model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def _eos_token_ids(loaded: LoadedModel) -> set[int]:
     """Collect every id that counts as "generation ended here" — models with
     chat-turn tokens (e.g. Qwen's <|im_end|>) often list more than one in
