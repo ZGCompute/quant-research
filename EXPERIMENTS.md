@@ -37,8 +37,29 @@ self-check (BF16 teacher-forced on its own trace) diverged on 8/8 problems, and 
 1024-token cap before finishing. Fixed: `load_model` now defaults to `attn_implementation="eager"`
 (the likely cause was `generate()`'s cached decoding and the harness's bulk forward pass hitting
 different fused-attention kernels under sdpa/flash, diverging slightly in bf16); `MAX_NEW_TOKENS`
-raised to 4096 with truncation now tracked and reported per-trace and in aggregate. Re-run pending
-(needs a Colab GPU runtime).
+raised to 4096 with truncation now tracked and reported per-trace and in aggregate.
+
+**Status (2026-08-10): first clean, validated result.** Four more real-Colab bugs surfaced and were
+fixed after the above (nested-clone from a non-idempotent clone cell, stale `sys.modules` cache
+surviving a code fix within one kernel session, and CUDA OOM — first from concurrent dual-model
+residency, then from per-problem allocator fragmentation even with one model resident; see commit
+history for `hf_runner.py` and the notebook). With all of those fixed, an 8-problem MATH-500 run
+completed end-to-end with no infra errors. Result: candidate (NF4) diverges from the BF16 reference
+earlier than the harness's own self-check noise floor in 7/8 problems (2.3×-39× earlier, one exact
+tie), and that divergence flips the final answer in 5/8 (62.5%). Self-check's divergence *margin* is
+an exact 0.0-nat tie in 5/8 cases (consistent with harmless bf16 rounding noise between incremental
+and bulk forward paths) while candidate's margins are typically much larger (up to 2.5 nats) — a
+confident distribution shift, not a coin-flip, which is what makes the early-divergence pattern read
+as a real quantization effect. n=8 is a smoke-test sample, not a claim; 3/8 traces still hit the
+4096-token cap (truncation doesn't affect the divergence-position metric itself, only
+`reference_correct`/`candidate_answer` for those specific rows).
+
+Scaling up now: added AIME 2025 alongside MATH-500 (`N_MATH=25`, `N_AIME=15`), with results broken
+out per-source since the two benchmarks differ enough in difficulty/length that a pooled rate would
+hide real differences. GPQA-Diamond and LiveCodeBench remain deferred — GPQA-Diamond
+(`Idavidrein/gpqa`) is gated and needs `huggingface-cli login`; LiveCodeBench needs
+code-execution-based correctness checking instead of boxed-answer extraction. Both are a genuinely
+different scaffolding problem, not just more data.
 
 ## Stage 1 — Error attribution (weight vs. KV-cache vs. activation)
 
