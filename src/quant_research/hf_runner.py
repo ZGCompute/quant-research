@@ -97,6 +97,27 @@ def load_model(
     return LoadedModel(model=model, tokenizer=tokenizer, quant_mode=quant_mode)
 
 
+def release_cuda_memory() -> None:
+    """Run garbage collection and empty PyTorch's CUDA caching allocator.
+
+    Call this between *every* problem within a phase's loop, not just once
+    between phases. generate() and the teacher-forced full-sequence forward
+    pass each leave cached-but-unallocated blocks behind; the allocator
+    won't reuse a block for a differently-shaped request, so those blocks
+    just accumulate as fragmentation across problems. This showed up as a
+    CUDA OOM on the *second* problem of Stage 0's reference-only phase even
+    with only one model resident (13.22 GiB in use, but only 2.14 GiB
+    requested and 1.34 GiB nominally free — a fragmentation OOM, not a
+    genuine out-of-capacity one)."""
+    import gc
+
+    import torch
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def unload_model(loaded: LoadedModel) -> None:
     """Drop a LoadedModel's GPU memory. Keeping both the BF16 reference and
     the NF4 candidate resident at once (as Stage 0 originally did, to score
@@ -108,14 +129,8 @@ def unload_model(loaded: LoadedModel) -> None:
     *then* load `candidate`) keeps only one 4B-class model resident at a
     time. `del` alone does not free CUDA memory promptly enough here since
     the caching allocator holds blocks until an explicit empty_cache."""
-    import gc
-
-    import torch
-
     del loaded.model
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    release_cuda_memory()
 
 
 def _eos_token_ids(loaded: LoadedModel) -> set[int]:
