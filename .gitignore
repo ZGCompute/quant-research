@@ -11,3 +11,9 @@ venv/
 .ruff_cache/
 dist/
 build/
+
+# Colab notebook runtime artifacts — generated at the repo root inside the
+# cloned repo on the Colab VM (relative to whatever cwd the notebook %cd'd
+# into), never meant to be committed.
+stage0_results.json
+*_checkpoint.jsonl
