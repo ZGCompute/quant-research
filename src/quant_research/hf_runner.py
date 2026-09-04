@@ -183,13 +183,32 @@ def logits_to_step_distribution(step_logits: torch.Tensor, topk: int = 5) -> Ste
 
 
 def teacher_forced_step_distributions(
-    loaded: LoadedModel, prompt: str, response_token_ids: list[int], topk: int = 5
+    loaded: LoadedModel,
+    prompt: str,
+    response_token_ids: list[int],
+    topk: int = 5,
+    chunk_size: int = 512,
 ) -> list[StepDistribution]:
-    """Feed `prompt + response_token_ids` through `loaded.model` in a single
-    forward pass and extract this model's own top-k next-token distribution
-    at each response position — the teacher-forced replay described in
-    EXPERIMENTS.md Stage 0: feed the candidate model the reference prefix and
-    compare its next-token distribution to the reference's at that position.
+    """Feed `prompt + response_token_ids` through `loaded.model` and extract
+    this model's own top-k next-token distribution at each response position
+    — the teacher-forced replay described in EXPERIMENTS.md Stage 0: feed the
+    candidate model the reference prefix and compare its next-token
+    distribution to the reference's at that position.
+
+    Processes the sequence in `chunk_size`-token chunks carrying a KV cache
+    across chunks, rather than one single-shot whole-sequence forward pass.
+    A single-shot eager-attention forward materializes a full
+    [heads, seq_len, seq_len] attention-score matrix per layer — quadratic in
+    sequence length — which OOM'd mid-Stage-0-scale-up once MAX_NEW_TOKENS
+    was raised to 6144 (a ~6500-token sequence), on a problem long enough to
+    exceed a 14.56GB Colab GPU even after the six prior dual-residency/
+    fragmentation/sys.modules fixes, none of which touch single-sequence
+    attention memory. Chunking bounds each step's attention matrix to
+    [heads, chunk_size, seen_so_far] instead. This does not reintroduce the
+    generate()-vs-bulk-forward divergence bug that eager attention was chosen
+    to fix (see load_model's docstring): eager is plain matmuls with no
+    cache-shape-dependent fused kernel, so it computes the same result
+    whether the sequence arrives in one shot or across a growing KV cache.
 
     Also useful as a sanity check when `loaded` IS the reference model: its
     own teacher-forced trace should diverge ~nowhere from the greedy trace it
@@ -199,13 +218,29 @@ def teacher_forced_step_distributions(
 
     prompt_ids = loaded.tokenizer(prompt, return_tensors="pt").input_ids[0].tolist()
     full_ids = prompt_ids + response_token_ids
-    input_tensor = torch.tensor([full_ids], device=loaded.model.device)
-
-    with torch.no_grad():
-        logits = loaded.model(input_tensor).logits[0]
-
     prompt_len = len(prompt_ids)
-    return [
-        logits_to_step_distribution(logits[prompt_len - 1 + i], topk=topk)
-        for i in range(len(response_token_ids))
-    ]
+    # Distributions are needed at positions [prompt_len - 1, len(full_ids) - 2]
+    # inclusive — each predicts the next response token at that position.
+    last_needed_pos = len(full_ids) - 2
+
+    distributions: list[StepDistribution] = []
+    past_key_values = None
+    position = 0
+    with torch.no_grad():
+        while position < len(full_ids):
+            chunk_ids = full_ids[position : position + chunk_size]
+            input_tensor = torch.tensor([chunk_ids], device=loaded.model.device)
+            out = loaded.model(
+                input_tensor, past_key_values=past_key_values, use_cache=True
+            )
+            past_key_values = out.past_key_values
+            chunk_logits = out.logits[0]
+            for i in range(len(chunk_ids)):
+                abs_pos = position + i
+                if prompt_len - 1 <= abs_pos <= last_needed_pos:
+                    distributions.append(
+                        logits_to_step_distribution(chunk_logits[i], topk=topk)
+                    )
+            position += chunk_size
+
+    return distributions
